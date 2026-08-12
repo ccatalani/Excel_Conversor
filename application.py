@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO, StringIO
+from pathlib import Path
 
 
 # ---------------------------------------------------------
@@ -57,17 +58,31 @@ st.markdown(
 # Header
 # ---------------------------------------------------------
 
-st.markdown(
-    '<div class="title">📈 CSV File Consolidator</div>',
-    unsafe_allow_html=True
+logo_path = (
+    Path(__file__).parent
+    / "Logo_1200x300_rectangle_blue_yellow__transparent_bg.png"
 )
 
-st.markdown(
-    '<div class="subtitle">'
-    'Upload filtered CSV files and generate a single consolidated file.'
-    '</div>',
-    unsafe_allow_html=True
-)
+title_column, logo_column = st.columns([4, 1])
+
+with title_column:
+    st.markdown(
+        '<div class="title">📈 CSV/Excel File Consolidator</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        '<div class="subtitle">'
+        'Upload filtered CSV or Excel files and generate a single consolidated file.'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+with logo_column:
+    st.image(
+        str(logo_path),
+        use_container_width=True
+    )
 
 
 # ---------------------------------------------------------
@@ -184,6 +199,8 @@ def read_csv_automatically(uploaded_file):
     - File encoding
     - Separator
     - Actual header line
+
+    Returns a tuple: (dataframe, separator, encoding, header_index)
     """
 
     file_bytes = uploaded_file.getvalue()
@@ -242,6 +259,133 @@ def read_csv_automatically(uploaded_file):
         encoding,
         header_index
     )
+
+
+# ---------------------------------------------------------
+# Excel reading functions
+# ---------------------------------------------------------
+
+def find_header_row_in_dataframe(raw_dataframe):
+    """
+    Finds the actual header row inside a DataFrame read
+    without a header (header=None), mirroring the logic
+    used for CSV files.
+    """
+
+    def non_empty_count(row_values):
+        return sum(
+            1
+            for value in row_values
+            if str(value).strip() and str(value).strip().lower() != "nan"
+        )
+
+    # First, look for the expected header pattern
+    for index, row in raw_dataframe.iterrows():
+        row_values = row.tolist()
+        row_text = " ".join(str(value) for value in row_values)
+
+        contains_column_name = (
+            "Product[" in row_text
+            or "Customer[" in row_text
+        )
+
+        if contains_column_name and non_empty_count(row_values) >= 2:
+            return index
+
+    # Fallback: first row with at least two non-empty values
+    for index, row in raw_dataframe.iterrows():
+        row_values = row.tolist()
+
+        if non_empty_count(row_values) >= 2:
+            return index
+
+    # If nothing is found, use the first row
+    return 0
+
+
+def read_excel_automatically(uploaded_file):
+    """
+    Reads an Excel file (.xlsx or .xls) and automatically
+    identifies the actual header row, similarly to what is
+    done for CSV files.
+
+    Returns a tuple: (dataframe, separator, encoding, header_index)
+    Separator and encoding do not apply to Excel files, so
+    they are returned as None.
+    """
+
+    file_bytes = uploaded_file.getvalue()
+    excel_buffer = BytesIO(file_bytes)
+
+    # First pass: read raw content without a header
+    raw_dataframe = pd.read_excel(
+        excel_buffer,
+        header=None,
+        dtype=str,
+        engine="openpyxl"
+    )
+
+    if raw_dataframe.empty:
+        raise ValueError("The file is empty.")
+
+    header_index = find_header_row_in_dataframe(raw_dataframe)
+
+    # Second pass: read again using the correct header row
+    excel_buffer.seek(0)
+
+    dataframe = pd.read_excel(
+        excel_buffer,
+        header=header_index,
+        dtype=str,
+        engine="openpyxl"
+    )
+
+    # Remove extra spaces from column names
+    dataframe.columns = (
+        dataframe.columns
+        .astype(str)
+        .str.strip()
+    )
+
+    # Remove columns generated as "Unnamed"
+    dataframe = dataframe.loc[
+        :,
+        ~dataframe.columns.str.match(r"^Unnamed")
+    ]
+
+    # Remove completely empty rows
+    dataframe = (
+        dataframe
+        .dropna(how="all")
+        .reset_index(drop=True)
+    )
+
+    return (
+        dataframe,
+        None,
+        None,
+        header_index
+    )
+
+
+def read_file_automatically(uploaded_file):
+    """
+    Dispatches the file reading logic based on the file
+    extension (.csv, .xlsx or .xls).
+    """
+
+    file_extension = Path(uploaded_file.name).suffix.lower()
+
+    if file_extension == ".csv":
+        return read_csv_automatically(uploaded_file)
+
+    elif file_extension in [".xlsx", ".xls"]:
+        return read_excel_automatically(uploaded_file)
+
+    else:
+        raise ValueError(
+            f"Unsupported file type: {file_extension}"
+        )
 
 
 # ---------------------------------------------------------
@@ -313,14 +457,14 @@ def clear_uploaded_files():
 # File upload
 # ---------------------------------------------------------
 
-st.subheader("1. Upload CSV files")
+st.subheader("1. Upload CSV or Excel files")
 
 upload_column, clear_button_column = st.columns([5, 1])
 
 with upload_column:
     uploaded_files = st.file_uploader(
-        "Select one or more CSV files",
-        type=["csv"],
+        "Select one or more CSV or Excel files",
+        type=["csv", "xlsx", "xls"],
         accept_multiple_files=True,
         help="The files should have compatible columns.",
         key=f"file_uploader_{st.session_state.uploader_key}"
@@ -352,7 +496,7 @@ if uploaded_files:
                     separator,
                     encoding,
                     header_index
-                ) = read_csv_automatically(uploaded_file)
+                ) = read_file_automatically(uploaded_file)
 
                 if dataframe.empty:
                     errors.append(
@@ -372,11 +516,19 @@ if uploaded_files:
 
                 dataframes.append(dataframe)
 
+                separator_label = (
+                    f"`{separator}`" if separator is not None else "N/A"
+                )
+
+                encoding_label = (
+                    f"`{encoding}`" if encoding is not None else "N/A"
+                )
+
                 st.success(
                     f"**{uploaded_file.name}** — "
                     f"header found on line {header_index + 1} — "
-                    f"separator `{separator}` — "
-                    f"encoding `{encoding}` — "
+                    f"separator {separator_label} — "
+                    f"encoding {encoding_label} — "
                     f"{len(dataframe.columns)} columns — "
                     f"{len(dataframe)} rows"
                 )
@@ -551,5 +703,5 @@ if uploaded_files:
 
 else:
     st.info(
-        "Upload your CSV files to start the consolidation."
+        "Upload your CSV or Excel files to start the consolidation."
     )
